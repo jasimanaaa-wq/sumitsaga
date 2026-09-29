@@ -1,0 +1,546 @@
+diff --git a/app/group/[id]/page.tsx b/app/group/[id]/page.tsx
+index e25f535..0407a47 100644
+--- a/app/group/[id]/page.tsx
++++ b/app/group/[id]/page.tsx
+@@ -24,9 +24,8 @@ import { Button } from "@/components/ui/button"
+ import { Badge } from "@/components/ui/badge"
+ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+ import { Input } from "@/components/ui/input"
+-import { NameGate } from "@/components/name-gate"
+ import { getDb } from "@/lib/firebase"
+-import { useUser } from "@/hooks/use-user"
++import { useRequireUser } from "@/hooks/use-user"
+ import { cn } from "@/lib/utils"
+ 
+ type GroupDoc = {
+@@ -56,7 +55,7 @@ type Message = {
+ export default function GroupChatPage() {
+   const { id } = useParams<{ id: string }>()
+   const router = useRouter()
+-  const { user, name, setName, loading, error } = useUser()
++  const { user, name, ready, signOut } = useRequireUser()
+ 
+   const [group, setGroup] = useState<GroupDoc | null>(null)
+   const [groupState, setGroupState] = useState<"loading" | "ready" | "missing">("loading")
+@@ -177,19 +176,9 @@ export default function GroupChatPage() {
+     }
+   }
+ 
+-  if (error) {
+-    return (
+-      <div className="min-h-screen flex items-center justify-center p-4 text-center">
+-        <p className="text-destructive max-w-md">
+-          Could not connect to Firebase: {error}. Check your .env.local values and that Anonymous sign-in is enabled.
+-        </p>
+-      </div>
+-    )
+-  }
+-  if (loading || groupState === "loading") {
++  if (!ready || groupState === "loading") {
+     return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading…</div>
+   }
+-  if (!name) return <NameGate onSubmit={setName} />
+   if (groupState === "missing" || !group) {
+     return (
+       <div className="min-h-screen flex flex-col items-center justify-center gap-4">
+@@ -220,11 +209,16 @@ export default function GroupChatPage() {
+               <h1 className="text-xl font-bold text-foreground">{group.name}</h1>
+             </div>
+           </div>
+-          {isMember && user?.uid !== group.organizerId && (
+-            <Button variant="outline" size="sm" onClick={leaveGroup}>
+-              Leave group
++          <div className="flex items-center space-x-2">
++            {isMember && user?.uid !== group.organizerId && (
++              <Button variant="outline" size="sm" onClick={leaveGroup}>
++                Leave group
++              </Button>
++            )}
++            <Button variant="ghost" size="sm" onClick={() => signOut()}>
++              Sign out
+             </Button>
+-          )}
++          </div>
+         </div>
+       </div>
+ 
+diff --git a/app/group/page.tsx b/app/group/page.tsx
+index f0323f5..0c76678 100644
+--- a/app/group/page.tsx
++++ b/app/group/page.tsx
+@@ -17,8 +17,7 @@ import {
+   serverTimestamp,
+ } from "firebase/firestore"
+ import { getDb } from "@/lib/firebase"
+-import { useUser } from "@/hooks/use-user"
+-import { NameGate } from "@/components/name-gate"
++import { useRequireUser } from "@/hooks/use-user"
+ import { Button } from "@/components/ui/button"
+ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+ import { Input } from "@/components/ui/input"
+@@ -62,7 +61,7 @@ const fortsData: Record<string, string> = {
+ 
+ export default function GroupPage() {
+   const router = useRouter()
+-  const { user, name, setName, loading, error } = useUser()
++  const { user, name, ready, signOut } = useRequireUser()
+   const [groups, setGroups] = useState<Group[]>([])
+   const [groupsLoading, setGroupsLoading] = useState(true)
+   const [actionError, setActionError] = useState<string | null>(null)
+@@ -183,19 +182,9 @@ export default function GroupPage() {
+     }
+   }
+ 
+-  if (error) {
+-    return (
+-      <div className="min-h-screen flex items-center justify-center p-4 text-center">
+-        <p className="text-destructive max-w-md">
+-          Could not connect to Firebase: {error}. Check your .env.local values and that Anonymous sign-in is enabled.
+-        </p>
+-      </div>
+-    )
+-  }
+-  if (loading) {
++  if (!ready || !user) {
+     return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading…</div>
+   }
+-  if (!name) return <NameGate onSubmit={setName} />
+ 
+   return (
+     <div className="min-h-screen bg-background">
+@@ -215,6 +204,12 @@ export default function GroupPage() {
+                 <h1 className="text-xl font-bold text-foreground">Forts Explorer</h1>
+               </div>
+             </div>
++            <div className="flex items-center space-x-3">
++              <span className="text-sm text-muted-foreground hidden sm:inline">{name}</span>
++              <Button variant="outline" size="sm" onClick={() => signOut()}>
++                Sign out
++              </Button>
++            </div>
+           </div>
+         </div>
+       </div>
+diff --git a/app/layout.tsx b/app/layout.tsx
+index 28c4784..33af310 100644
+--- a/app/layout.tsx
++++ b/app/layout.tsx
+@@ -4,6 +4,7 @@ import { GeistSans } from "geist/font/sans"
+ import { GeistMono } from "geist/font/mono"
+ import { Analytics } from "@vercel/analytics/next"
+ import { Suspense } from "react"
++import { AuthProvider } from "@/components/auth-provider"
+ import "./globals.css"
+ 
+ export const metadata: Metadata = {
+@@ -20,7 +21,9 @@ export default function RootLayout({
+   return (
+     <html lang="en" className="dark">
+       <body className={`font-sans ${GeistSans.variable} ${GeistMono.variable} antialiased`}>
+-        <Suspense fallback={null}>{children}</Suspense>
++        <AuthProvider>
++          <Suspense fallback={null}>{children}</Suspense>
++        </AuthProvider>
+         <Analytics />
+       </body>
+     </html>
+diff --git a/app/login/page.tsx b/app/login/page.tsx
+new file mode 100644
+index 0000000..9e35c81
+--- /dev/null
++++ b/app/login/page.tsx
+@@ -0,0 +1,207 @@
++"use client"
++
++import { useEffect, useState } from "react"
++import { useRouter } from "next/navigation"
++import Link from "next/link"
++import {
++  GoogleAuthProvider,
++  createUserWithEmailAndPassword,
++  sendPasswordResetEmail,
++  signInWithEmailAndPassword,
++  signInWithPopup,
++  updateProfile,
++} from "firebase/auth"
++import { ArrowLeft, Mountain } from "lucide-react"
++import { Button } from "@/components/ui/button"
++import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
++import { Input } from "@/components/ui/input"
++import { Label } from "@/components/ui/label"
++import { Separator } from "@/components/ui/separator"
++import { useAuth } from "@/components/auth-provider"
++import { getFirebaseAuth } from "@/lib/firebase"
++
++function friendlyError(err: unknown): string {
++  const code = (err as { code?: string })?.code ?? ""
++  switch (code) {
++    case "auth/invalid-credential":
++    case "auth/wrong-password":
++    case "auth/user-not-found":
++      return "Incorrect email or password."
++    case "auth/email-already-in-use":
++      return "An account with this email already exists. Try signing in."
++    case "auth/weak-password":
++      return "Password must be at least 6 characters."
++    case "auth/invalid-email":
++      return "Please enter a valid email address."
++    case "auth/too-many-requests":
++      return "Too many attempts. Please wait a moment and try again."
++    case "auth/popup-closed-by-user":
++    case "auth/cancelled-popup-request":
++      return ""
++    case "auth/operation-not-allowed":
++      return "This sign-in method isn't enabled in the Firebase console yet."
++    default:
++      return err instanceof Error ? err.message : "Something went wrong."
++  }
++}
++
++export default function LoginPage() {
++  const router = useRouter()
++  const { user, loading, configError, refresh } = useAuth()
++  const [mode, setMode] = useState<"signin" | "signup">("signin")
++  const [name, setName] = useState("")
++  const [email, setEmail] = useState("")
++  const [password, setPassword] = useState("")
++  const [busy, setBusy] = useState(false)
++  const [error, setError] = useState<string | null>(null)
++  const [info, setInfo] = useState<string | null>(null)
++  const [next, setNext] = useState("/group")
++
++  useEffect(() => {
++    const n = new URLSearchParams(window.location.search).get("next")
++    // only allow same-site relative paths
++    if (n && n.startsWith("/") && !n.startsWith("//")) setNext(n)
++  }, [])
++
++  // Already signed in (or just signed in) -> go where they were headed
++  useEffect(() => {
++    if (!loading && user) router.replace(next)
++  }, [loading, user, next, router])
++
++  const run = async (fn: () => Promise<unknown>) => {
++    setBusy(true)
++    setError(null)
++    setInfo(null)
++    try {
++      await fn()
++    } catch (err) {
++      const msg = friendlyError(err)
++      if (msg) setError(msg)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  const handleSubmit = (e: React.FormEvent) => {
++    e.preventDefault()
++    const auth = getFirebaseAuth()
++    run(async () => {
++      if (mode === "signup") {
++        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password)
++        await updateProfile(cred.user, { displayName: name.trim() })
++        // the auth listener fired before the name was set, so re-read the profile
++        await refresh()
++      } else {
++        await signInWithEmailAndPassword(auth, email.trim(), password)
++      }
++    })
++  }
++
++  const handleGoogle = () => run(() => signInWithPopup(getFirebaseAuth(), new GoogleAuthProvider()))
++
++  const handleReset = () => {
++    if (!email.trim()) {
++      setError("Enter your email above first, then click “Forgot password?”.")
++      return
++    }
++    run(async () => {
++      await sendPasswordResetEmail(getFirebaseAuth(), email.trim())
++      setInfo("Password reset email sent. Check your inbox.")
++    })
++  }
++
++  if (configError) {
++    return (
++      <div className="min-h-screen flex items-center justify-center p-4 text-center">
++        <p className="text-destructive max-w-md">Firebase isn't configured: {configError}. Check your .env.local values.</p>
++      </div>
++    )
++  }
++
++  return (
++    <div className="min-h-screen flex items-center justify-center p-4 bg-background">
++      <div className="w-full max-w-md space-y-4">
++        <Link href="/search">
++          <Button variant="ghost" size="sm">
++            <ArrowLeft className="h-4 w-4 mr-2" />
++            Back
++          </Button>
++        </Link>
++        <Card>
++          <CardHeader className="text-center">
++            <Mountain className="h-10 w-10 text-primary mx-auto mb-2" />
++            <CardTitle>{mode === "signin" ? "Welcome back" : "Create your account"}</CardTitle>
++            <CardDescription>
++              {mode === "signin" ? "Sign in to join groups and chat with trekkers." : "Sign up to create and join trek groups."}
++            </CardDescription>
++          </CardHeader>
++          <CardContent className="space-y-4">
++            <Button type="button" variant="outline" className="w-full" onClick={handleGoogle} disabled={busy}>
++              Continue with Google
++            </Button>
++
++            <div className="flex items-center gap-3">
++              <Separator className="flex-1" />
++              <span className="text-xs text-muted-foreground">or</span>
++              <Separator className="flex-1" />
++            </div>
++
++            <form onSubmit={handleSubmit} className="space-y-4">
++              {mode === "signup" && (
++                <div className="space-y-2">
++                  <Label htmlFor="name">Name</Label>
++                  <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="How trekkers will see you" maxLength={40} required />
++                </div>
++              )}
++              <div className="space-y-2">
++                <Label htmlFor="email">Email</Label>
++                <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
++              </div>
++              <div className="space-y-2">
++                <div className="flex items-center justify-between">
++                  <Label htmlFor="password">Password</Label>
++                  {mode === "signin" && (
++                    <button type="button" onClick={handleReset} className="text-xs text-primary hover:underline">
++                      Forgot password?
++                    </button>
++                  )}
++                </div>
++                <Input
++                  id="password"
++                  type="password"
++                  value={password}
++                  onChange={(e) => setPassword(e.target.value)}
++                  autoComplete={mode === "signin" ? "current-password" : "new-password"}
++                  minLength={6}
++                  required
++                />
++              </div>
++
++              {error && <p className="text-sm text-destructive">{error}</p>}
++              {info && <p className="text-sm text-muted-foreground">{info}</p>}
++
++              <Button type="submit" className="w-full" disabled={busy}>
++                {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
++              </Button>
++            </form>
++
++            <p className="text-center text-sm text-muted-foreground">
++              {mode === "signin" ? "New here? " : "Already have an account? "}
++              <button
++                type="button"
++                className="text-primary hover:underline"
++                onClick={() => {
++                  setMode(mode === "signin" ? "signup" : "signin")
++                  setError(null)
++                  setInfo(null)
++                }}
++              >
++                {mode === "signin" ? "Create an account" : "Sign in"}
++              </button>
++            </p>
++          </CardContent>
++        </Card>
++      </div>
++    </div>
++  )
++}
+diff --git a/components/auth-provider.tsx b/components/auth-provider.tsx
+new file mode 100644
+index 0000000..d80f729
+--- /dev/null
++++ b/components/auth-provider.tsx
+@@ -0,0 +1,60 @@
++"use client"
++
++import { createContext, useContext, useEffect, useState } from "react"
++import { onAuthStateChanged, signOut as fbSignOut, type User } from "firebase/auth"
++import { getFirebaseAuth } from "@/lib/firebase"
++
++type AuthState = {
++  user: User | null
++  /** Human-friendly name: profile name, else the part of the email before the @ */
++  name: string
++  loading: boolean
++  configError: string | null
++  signOut: () => Promise<void>
++  /** Re-read the profile (e.g. after updateProfile) and re-render */
++  refresh: () => Promise<void>
++}
++
++const AuthContext = createContext<AuthState | null>(null)
++
++export function displayNameOf(user: User | null) {
++  if (!user) return ""
++  return user.displayName?.trim() || user.email?.split("@")[0] || "Trekker"
++}
++
++export function AuthProvider({ children }: { children: React.ReactNode }) {
++  const [user, setUser] = useState<User | null>(null)
++  const [loading, setLoading] = useState(true)
++  const [configError, setConfigError] = useState<string | null>(null)
++  const [, setTick] = useState(0)
++
++  useEffect(() => {
++    try {
++      return onAuthStateChanged(getFirebaseAuth(), (u) => {
++        setUser(u)
++        setLoading(false)
++      })
++    } catch (e) {
++      setConfigError(e instanceof Error ? e.message : "Firebase is not configured")
++      setLoading(false)
++    }
++  }, [])
++
++  const signOut = () => fbSignOut(getFirebaseAuth())
++  const refresh = async () => {
++    await getFirebaseAuth().currentUser?.reload()
++    setTick((t) => t + 1)
++  }
++
++  return (
++    <AuthContext.Provider value={{ user, name: displayNameOf(user), loading, configError, signOut, refresh }}>
++      {children}
++    </AuthContext.Provider>
++  )
++}
++
++export function useAuth() {
++  const ctx = useContext(AuthContext)
++  if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>")
++  return ctx
++}
+diff --git a/components/name-gate.tsx b/components/name-gate.tsx
+deleted file mode 100644
+index 3e4c0e7..0000000
+--- a/components/name-gate.tsx
++++ /dev/null
+@@ -1,37 +0,0 @@
+-"use client"
+-
+-import { useState } from "react"
+-import { Mountain } from "lucide-react"
+-import { Button } from "@/components/ui/button"
+-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+-import { Input } from "@/components/ui/input"
+-
+-/** Shown once: asks for a display name so chat messages / member lists have a label. */
+-export function NameGate({ onSubmit }: { onSubmit: (name: string) => void }) {
+-  const [value, setValue] = useState("")
+-  return (
+-    <div className="min-h-screen flex items-center justify-center p-4 bg-background">
+-      <Card className="w-full max-w-md">
+-        <CardHeader className="text-center">
+-          <Mountain className="h-10 w-10 text-primary mx-auto mb-2" />
+-          <CardTitle>What should trekkers call you?</CardTitle>
+-          <CardDescription>This name is shown in groups and chat.</CardDescription>
+-        </CardHeader>
+-        <CardContent>
+-          <form
+-            className="space-y-4"
+-            onSubmit={(e) => {
+-              e.preventDefault()
+-              if (value.trim()) onSubmit(value)
+-            }}
+-          >
+-            <Input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Your name" maxLength={40} autoFocus />
+-            <Button type="submit" className="w-full" disabled={!value.trim()}>
+-              Continue
+-            </Button>
+-          </form>
+-        </CardContent>
+-      </Card>
+-    </div>
+-  )
+-}
+diff --git a/firestore.rules b/firestore.rules
+index 97253b9..09b2b9f 100644
+--- a/firestore.rules
++++ b/firestore.rules
+@@ -2,7 +2,11 @@ rules_version = '2';
+ service cloud.firestore {
+   match /databases/{database}/documents {
+ 
+-    function signedIn() { return request.auth != null; }
++    // Real accounts only (email/Google) - anonymous sessions are rejected.
++    function signedIn() {
++      return request.auth != null
++        && request.auth.token.firebase.sign_in_provider != 'anonymous';
++    }
+ 
+     match /groups/{groupId} {
+       allow read: if signedIn();
+diff --git a/hooks/use-user.ts b/hooks/use-user.ts
+index 208fad0..3f3ed9c 100644
+--- a/hooks/use-user.ts
++++ b/hooks/use-user.ts
+@@ -1,42 +1,23 @@
+ "use client"
+ 
+-import { useEffect, useState, useCallback } from "react"
+-import { onAuthStateChanged, signInAnonymously, type User } from "firebase/auth"
+-import { getFirebaseAuth } from "@/lib/firebase"
+-
+-const NAME_KEY = "summitsaga-display-name"
++import { useEffect } from "react"
++import { usePathname, useRouter } from "next/navigation"
++import { useAuth } from "@/components/auth-provider"
+ 
+ /**
+- * Anonymous Firebase auth + a locally remembered display name.
+- * `user.uid` is the stable identity used for group membership and chat messages.
++ * For pages that need a signed-in user: sends visitors to /login (and back afterwards).
++ * `ready` is true only once a user is available.
+  */
+-export function useUser() {
+-  const [user, setUser] = useState<User | null>(null)
+-  const [name, setNameState] = useState("")
+-  const [loading, setLoading] = useState(true)
+-  const [error, setError] = useState<string | null>(null)
++export function useRequireUser() {
++  const auth = useAuth()
++  const router = useRouter()
++  const pathname = usePathname()
+ 
+   useEffect(() => {
+-    setNameState(localStorage.getItem(NAME_KEY) ?? "")
+-    const auth = getFirebaseAuth()
+-    return onAuthStateChanged(auth, (u) => {
+-      if (u) {
+-        setUser(u)
+-        setLoading(false)
+-      } else {
+-        signInAnonymously(auth).catch((e) => {
+-          setError(e.message)
+-          setLoading(false)
+-        })
+-      }
+-    })
+-  }, [])
+-
+-  const setName = useCallback((value: string) => {
+-    const trimmed = value.trim().slice(0, 40)
+-    localStorage.setItem(NAME_KEY, trimmed)
+-    setNameState(trimmed)
+-  }, [])
++    if (!auth.loading && !auth.user && !auth.configError) {
++      router.replace(`/login?next=${encodeURIComponent(pathname)}`)
++    }
++  }, [auth.loading, auth.user, auth.configError, router, pathname])
+ 
+-  return { user, name, setName, loading, error }
++  return { ...auth, ready: !auth.loading && !!auth.user }
+ }

@@ -281,7 +281,7 @@ export default function FortDetailsPage({
   }
 
   const handleCreateGroup = () => {
-    window.location.href = `/groups?fort=${fort.id}`;
+    window.location.href = `/group?fort=${fort.id}`;
   };
 
   return (

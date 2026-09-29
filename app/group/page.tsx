@@ -3,6 +3,21 @@
 import type React from "react"
 
 import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
+import {
+  addDoc,
+  arrayUnion,
+  collection,
+  doc,
+  increment,
+  onSnapshot,
+  orderBy,
+  query,
+  runTransaction,
+  serverTimestamp,
+} from "firebase/firestore"
+import { getDb } from "@/lib/firebase"
+import { useRequireUser } from "@/hooks/use-user"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -13,56 +28,27 @@ import { Separator } from "@/components/ui/separator"
 import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Textarea } from "@/components/ui/textarea"
-import { Mountain, Users, CalendarIcon, ArrowLeft, MapPin, Clock, Plus, UserPlus } from "lucide-react"
+import { Mountain, Users, CalendarIcon, ArrowLeft, MapPin, Clock, Plus, UserPlus, MessageSquare } from "lucide-react"
 import Link from "next/link"
 import { format } from "date-fns"
 import { cn } from "@/lib/utils"
 
-// Sample existing groups data
-const existingGroups = [
-  {
-    id: 1,
-    name: "Lohgad Weekend Warriors",
-    fortName: "Lohgad Fort",
-    fortId: 1,
-    date: "2024-01-15",
-    members: 8,
-    maxMembers: 12,
-    organizer: "Rahul Patil",
-    description: "Early morning trek to catch the sunrise from Lohgad. Perfect for beginners!",
-    difficulty: "Moderate",
-    meetingPoint: "Lohgad Base Village",
-    meetingTime: "06:00 AM",
-  },
-  {
-    id: 2,
-    name: "Visapur Explorers",
-    fortName: "Visapur Fort",
-    fortId: 2,
-    date: "2024-01-20",
-    members: 5,
-    maxMembers: 10,
-    organizer: "Priya Sharma",
-    description: "Exploring the ancient caves and rock structures of Visapur Fort.",
-    difficulty: "Easy",
-    meetingPoint: "Visapur Base Village",
-    meetingTime: "07:00 AM",
-  },
-  {
-    id: 3,
-    name: "Tikona Challenge",
-    fortName: "Tikona Fort",
-    fortId: 4,
-    date: "2024-01-25",
-    members: 6,
-    maxMembers: 8,
-    organizer: "Amit Desai",
-    description: "Challenging trek to the triangular fort. For experienced trekkers only.",
-    difficulty: "Moderate",
-    meetingPoint: "Tikona Base Village",
-    meetingTime: "05:30 AM",
-  },
-]
+type Group = {
+  id: string
+  name: string
+  fortId: string
+  fortName: string
+  date: string // yyyy-MM-dd
+  members: number
+  maxMembers: number
+  organizerId: string
+  organizer: string
+  description: string
+  difficulty: string
+  meetingPoint: string
+  meetingTime: string
+  memberIds: string[]
+}
 
 const fortsData: Record<string, string> = {
   "1": "Lohgad Fort",
@@ -74,11 +60,19 @@ const fortsData: Record<string, string> = {
 }
 
 export default function GroupPage() {
+  const router = useRouter()
+  const { user, name, ready, signOut } = useRequireUser()
+  const [groups, setGroups] = useState<Group[]>([])
+  const [groupsLoading, setGroupsLoading] = useState(true)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [joiningId, setJoiningId] = useState<string | null>(null)
+
   const [selectedFort, setSelectedFort] = useState<string>("")
   const [selectedDate, setSelectedDate] = useState<Date>()
   const [groupName, setGroupName] = useState("")
   const [description, setDescription] = useState("")
   const [maxMembers, setMaxMembers] = useState("10")
+  const [difficulty, setDifficulty] = useState("Moderate")
   const [meetingPoint, setMeetingPoint] = useState("")
   const [meetingTime, setMeetingTime] = useState("")
   const [isCreating, setIsCreating] = useState(false)
@@ -92,25 +86,104 @@ export default function GroupPage() {
     }
   }, [])
 
+  // Live list of groups
+  useEffect(() => {
+    if (!user) return
+    const q = query(collection(getDb(), "groups"), orderBy("createdAt", "desc"))
+    return onSnapshot(
+      q,
+      (snap) => {
+        setGroups(
+          snap.docs.map((d) => {
+            const g = d.data()
+            return {
+              id: d.id,
+              name: g.name,
+              fortId: g.fortId,
+              fortName: g.fortName,
+              date: g.date,
+              members: g.memberCount,
+              maxMembers: g.maxMembers,
+              organizerId: g.organizerId,
+              organizer: g.organizerName,
+              description: g.description,
+              difficulty: g.difficulty,
+              meetingPoint: g.meetingPoint,
+              meetingTime: g.meetingTime,
+              memberIds: g.memberIds ?? [],
+            } as Group
+          }),
+        )
+        setGroupsLoading(false)
+      },
+      (e) => {
+        setActionError(e.message)
+        setGroupsLoading(false)
+      },
+    )
+  }, [user])
+
   const handleCreateGroup = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!user) return
+    if (!selectedDate) {
+      setActionError("Please pick a trek date.")
+      return
+    }
     setIsCreating(true)
-
-    // Simulate group creation
-    setTimeout(() => {
+    setActionError(null)
+    try {
+      const ref = await addDoc(collection(getDb(), "groups"), {
+        name: groupName.trim(),
+        fortId: selectedFort,
+        fortName: fortsData[selectedFort],
+        description: description.trim(),
+        date: format(selectedDate, "yyyy-MM-dd"),
+        meetingPoint: meetingPoint.trim(),
+        meetingTime,
+        difficulty,
+        maxMembers: Number(maxMembers),
+        memberCount: 1,
+        memberIds: [user.uid],
+        members: { [user.uid]: name },
+        organizerId: user.uid,
+        organizerName: name,
+        createdAt: serverTimestamp(),
+      })
+      router.push(`/group/${ref.id}`)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not create group")
       setIsCreating(false)
-      alert("Group created successfully! You'll be redirected to the group page.")
-      // Reset form
-      setGroupName("")
-      setDescription("")
-      setSelectedDate(undefined)
-      setMeetingPoint("")
-      setMeetingTime("")
-    }, 2000)
+    }
   }
 
-  const handleJoinGroup = (groupId: number) => {
-    alert(`Successfully joined the group! You'll receive further details via email.`)
+  const handleJoinGroup = async (groupId: string) => {
+    if (!user) return
+    setJoiningId(groupId)
+    setActionError(null)
+    try {
+      const ref = doc(getDb(), "groups", groupId)
+      await runTransaction(getDb(), async (tx) => {
+        const snap = await tx.get(ref)
+        if (!snap.exists()) throw new Error("This group no longer exists.")
+        const g = snap.data()
+        if (g.memberIds.includes(user.uid)) return
+        if (g.memberCount >= g.maxMembers) throw new Error("This group is full.")
+        tx.update(ref, {
+          memberIds: arrayUnion(user.uid),
+          memberCount: increment(1),
+          [`members.${user.uid}`]: name,
+        })
+      })
+      router.push(`/group/${groupId}`)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not join group")
+      setJoiningId(null)
+    }
+  }
+
+  if (!ready || !user) {
+    return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading…</div>
   }
 
   return (
@@ -130,6 +203,12 @@ export default function GroupPage() {
                 <Mountain className="h-6 w-6 text-primary" />
                 <h1 className="text-xl font-bold text-foreground">Forts Explorer</h1>
               </div>
+            </div>
+            <div className="flex items-center space-x-3">
+              <span className="text-sm text-muted-foreground hidden sm:inline">{name}</span>
+              <Button variant="outline" size="sm" onClick={() => signOut()}>
+                Sign out
+              </Button>
             </div>
           </div>
         </div>
@@ -165,8 +244,14 @@ export default function GroupPage() {
                   <div className="space-y-4">
                     <h3 className="text-xl font-semibold text-foreground">Available Groups</h3>
 
+                    {actionError && <p className="text-sm text-destructive">{actionError}</p>}
+                    {groupsLoading && <p className="text-muted-foreground">Loading groups…</p>}
+                    {!groupsLoading && groups.length === 0 && (
+                      <p className="text-muted-foreground">No groups yet. Be the first to create one!</p>
+                    )}
+
                     <div className="grid md:grid-cols-2 gap-4">
-                      {existingGroups.map((group) => (
+                      {groups.map((group) => (
                         <Card key={group.id} className="border-border hover:border-primary/50 transition-colors">
                           <CardHeader className="pb-3">
                             <div className="flex items-start justify-between">
@@ -190,7 +275,7 @@ export default function GroupPage() {
                               <div className="flex items-center justify-between">
                                 <div className="flex items-center text-muted-foreground">
                                   <CalendarIcon className="h-3 w-3 mr-1" />
-                                  {format(new Date(group.date), "MMM dd, yyyy")}
+                                  {format(new Date(`${group.date}T00:00:00`), "MMM dd, yyyy")}
                                 </div>
                                 <div className="flex items-center text-muted-foreground">
                                   <Clock className="h-3 w-3 mr-1" />
@@ -214,13 +299,26 @@ export default function GroupPage() {
 
                             <Separator />
 
-                            <Button
-                              onClick={() => handleJoinGroup(group.id)}
-                              className="w-full"
-                              disabled={group.members >= group.maxMembers}
-                            >
-                              {group.members >= group.maxMembers ? "Group Full" : "Join Group"}
-                            </Button>
+                            {user && group.memberIds.includes(user.uid) ? (
+                              <Button asChild className="w-full">
+                                <Link href={`/group/${group.id}`}>
+                                  <MessageSquare className="h-4 w-4 mr-2" />
+                                  Open Chat
+                                </Link>
+                              </Button>
+                            ) : (
+                              <Button
+                                onClick={() => handleJoinGroup(group.id)}
+                                className="w-full"
+                                disabled={group.members >= group.maxMembers || joiningId === group.id}
+                              >
+                                {group.members >= group.maxMembers
+                                  ? "Group Full"
+                                  : joiningId === group.id
+                                    ? "Joining..."
+                                    : "Join Group"}
+                              </Button>
+                            )}
                           </CardContent>
                         </Card>
                       ))}
@@ -328,6 +426,20 @@ export default function GroupPage() {
                       </div>
 
                       <div className="space-y-2">
+                        <Label htmlFor="difficulty">Difficulty</Label>
+                        <select
+                          id="difficulty"
+                          value={difficulty}
+                          onChange={(e) => setDifficulty(e.target.value)}
+                          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <option>Easy</option>
+                          <option>Moderate</option>
+                          <option>Hard</option>
+                        </select>
+                      </div>
+
+                      <div className="space-y-2">
                         <Label htmlFor="meeting-point">Meeting Point</Label>
                         <Input
                           id="meeting-point"
@@ -338,6 +450,8 @@ export default function GroupPage() {
                           className="bg-background"
                         />
                       </div>
+
+                      {actionError && <p className="text-sm text-destructive">{actionError}</p>}
 
                       <Button type="submit" className="w-full" disabled={isCreating}>
                         {isCreating ? "Creating Group..." : "Create Group"}

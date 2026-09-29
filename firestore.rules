@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Real accounts only (email/Google) - anonymous sessions are rejected.
+    function signedIn() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    match /groups/{groupId} {
+      allow read: if signedIn();
+
+      // Creator becomes the first member.
+      allow create: if signedIn()
+        && request.resource.data.organizerId == request.auth.uid
+        && request.resource.data.memberIds == [request.auth.uid]
+        && request.resource.data.memberCount == 1
+        && request.resource.data.maxMembers is int
+        && request.resource.data.maxMembers >= 2
+        && request.resource.data.maxMembers <= 20;
+
+      // Only membership fields can change, and only for yourself.
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['memberIds', 'memberCount', 'members'])
+        && (
+          // join (respecting capacity)
+          ( !(request.auth.uid in resource.data.memberIds)
+            && request.auth.uid in request.resource.data.memberIds
+            && request.resource.data.memberIds.size() == resource.data.memberIds.size() + 1
+            && request.resource.data.memberCount == resource.data.memberCount + 1
+            && request.resource.data.memberCount <= resource.data.maxMembers )
+          ||
+          // leave (organizer cannot leave)
+          ( request.auth.uid in resource.data.memberIds
+            && !(request.auth.uid in request.resource.data.memberIds)
+            && request.auth.uid != resource.data.organizerId
+            && request.resource.data.memberIds.size() == resource.data.memberIds.size() - 1
+            && request.resource.data.memberCount == resource.data.memberCount - 1 )
+        );
+
+      allow delete: if signedIn() && resource.data.organizerId == request.auth.uid;
+
+      // Chat: only group members can read or post.
+      match /messages/{messageId} {
+        allow read: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberIds;
+
+        allow create: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberIds
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 1000;
+      }
+    }
+  }
+}

@@ -1,0 +1,1168 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..8a6dbf3
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,7 @@
++# Firebase console -> Project settings -> Your apps -> Web app -> SDK config
++NEXT_PUBLIC_FIREBASE_API_KEY=
++NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
++NEXT_PUBLIC_FIREBASE_PROJECT_ID=
++NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
++NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
++NEXT_PUBLIC_FIREBASE_APP_ID=
+diff --git a/.gitignore b/.gitignore
+index f650315..3c35968 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -18,6 +18,7 @@ yarn-error.log*
+ 
+ # env files
+ .env*
++!.env.example
+ 
+ # vercel
+ .vercel
+diff --git a/app/fort/[id]/page.tsx b/app/fort/[id]/page.tsx
+index 10a4b9a..4a0df6d 100644
+--- a/app/fort/[id]/page.tsx
++++ b/app/fort/[id]/page.tsx
+@@ -281,7 +281,7 @@ export default function FortDetailsPage({
+   }
+ 
+   const handleCreateGroup = () => {
+-    window.location.href = `/groups?fort=${fort.id}`;
++    window.location.href = `/group?fort=${fort.id}`;
+   };
+ 
+   return (
+diff --git a/app/group/[id]/page.tsx b/app/group/[id]/page.tsx
+new file mode 100644
+index 0000000..0407a47
+--- /dev/null
++++ b/app/group/[id]/page.tsx
+@@ -0,0 +1,332 @@
++"use client"
++
++import { useEffect, useRef, useState } from "react"
++import { useParams, useRouter } from "next/navigation"
++import Link from "next/link"
++import { format } from "date-fns"
++import {
++  addDoc,
++  arrayRemove,
++  arrayUnion,
++  collection,
++  deleteField,
++  doc,
++  increment,
++  limitToLast,
++  onSnapshot,
++  orderBy,
++  query,
++  runTransaction,
++  serverTimestamp,
++} from "firebase/firestore"
++import { ArrowLeft, CalendarIcon, Clock, MapPin, Mountain, Send, Users } from "lucide-react"
++import { Button } from "@/components/ui/button"
++import { Badge } from "@/components/ui/badge"
++import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
++import { Input } from "@/components/ui/input"
++import { getDb } from "@/lib/firebase"
++import { useRequireUser } from "@/hooks/use-user"
++import { cn } from "@/lib/utils"
++
++type GroupDoc = {
++  name: string
++  fortName: string
++  description: string
++  date: string
++  meetingPoint: string
++  meetingTime: string
++  difficulty: string
++  maxMembers: number
++  memberCount: number
++  memberIds: string[]
++  members: Record<string, string>
++  organizerId: string
++  organizerName: string
++}
++
++type Message = {
++  id: string
++  text: string
++  senderId: string
++  senderName: string
++  createdAt: Date | null
++}
++
++export default function GroupChatPage() {
++  const { id } = useParams<{ id: string }>()
++  const router = useRouter()
++  const { user, name, ready, signOut } = useRequireUser()
++
++  const [group, setGroup] = useState<GroupDoc | null>(null)
++  const [groupState, setGroupState] = useState<"loading" | "ready" | "missing">("loading")
++  const [messages, setMessages] = useState<Message[]>([])
++  const [draft, setDraft] = useState("")
++  const [sending, setSending] = useState(false)
++  const [actionError, setActionError] = useState<string | null>(null)
++  const bottomRef = useRef<HTMLDivElement>(null)
++
++  const isMember = !!user && !!group?.memberIds.includes(user.uid)
++
++  // Live group document
++  useEffect(() => {
++    if (!user || !id) return
++    return onSnapshot(
++      doc(getDb(), "groups", id),
++      (snap) => {
++        if (!snap.exists()) {
++          setGroupState("missing")
++          return
++        }
++        setGroup(snap.data() as GroupDoc)
++        setGroupState("ready")
++      },
++      (e) => setActionError(e.message),
++    )
++  }, [user, id])
++
++  // Live messages (members only; Firestore rules enforce this too)
++  useEffect(() => {
++    if (!user || !id || !isMember) return
++    const q = query(collection(getDb(), "groups", id, "messages"), orderBy("createdAt", "asc"), limitToLast(200))
++    return onSnapshot(
++      q,
++      (snap) => {
++        setMessages(
++          snap.docs.map((d) => {
++            // "estimate" shows a just-sent message immediately instead of waiting for the server timestamp
++            const m = d.data({ serverTimestamps: "estimate" })
++            return {
++              id: d.id,
++              text: m.text,
++              senderId: m.senderId,
++              senderName: m.senderName,
++              createdAt: m.createdAt ? m.createdAt.toDate() : null,
++            }
++          }),
++        )
++      },
++      (e) => setActionError(e.message),
++    )
++  }, [user, id, isMember])
++
++  useEffect(() => {
++    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
++  }, [messages])
++
++  const sendMessage = async (e: React.FormEvent) => {
++    e.preventDefault()
++    const text = draft.trim()
++    if (!text || !user || sending) return
++    setSending(true)
++    setActionError(null)
++    try {
++      await addDoc(collection(getDb(), "groups", id, "messages"), {
++        text: text.slice(0, 1000),
++        senderId: user.uid,
++        senderName: name,
++        createdAt: serverTimestamp(),
++      })
++      setDraft("")
++    } catch (err) {
++      setActionError(err instanceof Error ? err.message : "Could not send message")
++    } finally {
++      setSending(false)
++    }
++  }
++
++  const joinGroup = async () => {
++    if (!user) return
++    setActionError(null)
++    try {
++      const ref = doc(getDb(), "groups", id)
++      await runTransaction(getDb(), async (tx) => {
++        const snap = await tx.get(ref)
++        if (!snap.exists()) throw new Error("This group no longer exists.")
++        const g = snap.data()
++        if (g.memberIds.includes(user.uid)) return
++        if (g.memberCount >= g.maxMembers) throw new Error("This group is full.")
++        tx.update(ref, {
++          memberIds: arrayUnion(user.uid),
++          memberCount: increment(1),
++          [`members.${user.uid}`]: name,
++        })
++      })
++    } catch (err) {
++      setActionError(err instanceof Error ? err.message : "Could not join group")
++    }
++  }
++
++  const leaveGroup = async () => {
++    if (!user || !group || user.uid === group.organizerId) return
++    if (!confirm("Leave this group?")) return
++    try {
++      await runTransaction(getDb(), async (tx) => {
++        const ref = doc(getDb(), "groups", id)
++        const snap = await tx.get(ref)
++        if (!snap.exists() || !snap.data().memberIds.includes(user.uid)) return
++        tx.update(ref, {
++          memberIds: arrayRemove(user.uid),
++          memberCount: increment(-1),
++          [`members.${user.uid}`]: deleteField(),
++        })
++      })
++      router.push("/group")
++    } catch (err) {
++      setActionError(err instanceof Error ? err.message : "Could not leave group")
++    }
++  }
++
++  if (!ready || groupState === "loading") {
++    return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading…</div>
++  }
++  if (groupState === "missing" || !group) {
++    return (
++      <div className="min-h-screen flex flex-col items-center justify-center gap-4">
++        <p className="text-muted-foreground">This group doesn't exist.</p>
++        <Button asChild>
++          <Link href="/group">Back to groups</Link>
++        </Button>
++      </div>
++    )
++  }
++
++  const full = group.memberCount >= group.maxMembers
++
++  return (
++    <div className="min-h-screen bg-background flex flex-col">
++      {/* Header */}
++      <div className="border-b border-border bg-card">
++        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
++          <div className="flex items-center space-x-4">
++            <Link href="/group">
++              <Button variant="ghost" size="sm">
++                <ArrowLeft className="h-4 w-4 mr-2" />
++                All Groups
++              </Button>
++            </Link>
++            <div className="flex items-center space-x-2">
++              <Mountain className="h-6 w-6 text-primary" />
++              <h1 className="text-xl font-bold text-foreground">{group.name}</h1>
++            </div>
++          </div>
++          <div className="flex items-center space-x-2">
++            {isMember && user?.uid !== group.organizerId && (
++              <Button variant="outline" size="sm" onClick={leaveGroup}>
++                Leave group
++              </Button>
++            )}
++            <Button variant="ghost" size="sm" onClick={() => signOut()}>
++              Sign out
++            </Button>
++          </div>
++        </div>
++      </div>
++
++      <div className="container mx-auto px-4 py-6 grid lg:grid-cols-[1fr_320px] gap-6 flex-1">
++        {/* Chat */}
++        <Card className="flex flex-col h-[calc(100vh-10rem)]">
++          {isMember ? (
++            <>
++              <CardContent className="flex-1 overflow-y-auto p-4 space-y-3">
++                {messages.length === 0 && (
++                  <p className="text-center text-muted-foreground text-sm mt-8">
++                    No messages yet. Say hello to your fellow trekkers!
++                  </p>
++                )}
++                {messages.map((m) => {
++                  const mine = m.senderId === user?.uid
++                  return (
++                    <div key={m.id} className={cn("flex flex-col", mine ? "items-end" : "items-start")}>
++                      <span className="text-xs text-muted-foreground mb-0.5">
++                        {mine ? "You" : m.senderName}
++                        {m.createdAt && ` · ${format(m.createdAt, "MMM d, h:mm a")}`}
++                      </span>
++                      <div
++                        className={cn(
++                          "max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words",
++                          mine ? "bg-primary text-primary-foreground" : "bg-muted text-foreground",
++                        )}
++                      >
++                        {m.text}
++                      </div>
++                    </div>
++                  )
++                })}
++                <div ref={bottomRef} />
++              </CardContent>
++              <form onSubmit={sendMessage} className="border-t border-border p-3 flex gap-2">
++                <Input
++                  value={draft}
++                  onChange={(e) => setDraft(e.target.value)}
++                  placeholder="Type a message…"
++                  maxLength={1000}
++                  className="bg-background"
++                />
++                <Button type="submit" disabled={!draft.trim() || sending}>
++                  <Send className="h-4 w-4" />
++                </Button>
++              </form>
++            </>
++          ) : (
++            <CardContent className="flex-1 flex flex-col items-center justify-center gap-4 text-center">
++              <p className="text-muted-foreground max-w-sm">Join this group to read and send messages.</p>
++              <Button onClick={joinGroup} disabled={full}>
++                {full ? "Group Full" : "Join Group"}
++              </Button>
++            </CardContent>
++          )}
++          {actionError && <p className="text-sm text-destructive px-4 pb-3">{actionError}</p>}
++        </Card>
++
++        {/* Sidebar */}
++        <div className="space-y-4">
++          <Card>
++            <CardHeader className="pb-2">
++              <div className="flex items-center justify-between">
++                <CardTitle className="text-base">{group.fortName}</CardTitle>
++                <Badge variant={group.difficulty === "Easy" ? "secondary" : "outline"}>{group.difficulty}</Badge>
++              </div>
++            </CardHeader>
++            <CardContent className="space-y-2 text-sm text-muted-foreground">
++              <p className="text-foreground">{group.description}</p>
++              <div className="flex items-center">
++                <CalendarIcon className="h-3 w-3 mr-2" />
++                {format(new Date(group.date), "MMM dd, yyyy")}
++              </div>
++              <div className="flex items-center">
++                <Clock className="h-3 w-3 mr-2" />
++                {group.meetingTime}
++              </div>
++              <div className="flex items-center">
++                <MapPin className="h-3 w-3 mr-2" />
++                {group.meetingPoint}
++              </div>
++            </CardContent>
++          </Card>
++
++          <Card>
++            <CardHeader className="pb-2">
++              <CardTitle className="text-base flex items-center">
++                <Users className="h-4 w-4 mr-2" />
++                Members ({group.memberCount}/{group.maxMembers})
++              </CardTitle>
++            </CardHeader>
++            <CardContent>
++              <ul className="space-y-1 text-sm">
++                {Object.entries(group.members ?? {}).map(([uid, memberName]) => (
++                  <li key={uid} className="flex items-center justify-between">
++                    <span className="text-foreground">
++                      {memberName}
++                      {uid === user?.uid && " (you)"}
++                    </span>
++                    {uid === group.organizerId && <Badge variant="secondary">Organizer</Badge>}
++                  </li>
++                ))}
++              </ul>
++            </CardContent>
++          </Card>
++        </div>
++      </div>
++    </div>
++  )
++}
+diff --git a/app/group/page.tsx b/app/group/page.tsx
+index f547216..0c76678 100644
+--- a/app/group/page.tsx
++++ b/app/group/page.tsx
+@@ -3,6 +3,21 @@
+ import type React from "react"
+ 
+ import { useState, useEffect } from "react"
++import { useRouter } from "next/navigation"
++import {
++  addDoc,
++  arrayUnion,
++  collection,
++  doc,
++  increment,
++  onSnapshot,
++  orderBy,
++  query,
++  runTransaction,
++  serverTimestamp,
++} from "firebase/firestore"
++import { getDb } from "@/lib/firebase"
++import { useRequireUser } from "@/hooks/use-user"
+ import { Button } from "@/components/ui/button"
+ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+ import { Input } from "@/components/ui/input"
+@@ -13,56 +28,27 @@ import { Separator } from "@/components/ui/separator"
+ import { Calendar } from "@/components/ui/calendar"
+ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+ import { Textarea } from "@/components/ui/textarea"
+-import { Mountain, Users, CalendarIcon, ArrowLeft, MapPin, Clock, Plus, UserPlus } from "lucide-react"
++import { Mountain, Users, CalendarIcon, ArrowLeft, MapPin, Clock, Plus, UserPlus, MessageSquare } from "lucide-react"
+ import Link from "next/link"
+ import { format } from "date-fns"
+ import { cn } from "@/lib/utils"
+ 
+-// Sample existing groups data
+-const existingGroups = [
+-  {
+-    id: 1,
+-    name: "Lohgad Weekend Warriors",
+-    fortName: "Lohgad Fort",
+-    fortId: 1,
+-    date: "2024-01-15",
+-    members: 8,
+-    maxMembers: 12,
+-    organizer: "Rahul Patil",
+-    description: "Early morning trek to catch the sunrise from Lohgad. Perfect for beginners!",
+-    difficulty: "Moderate",
+-    meetingPoint: "Lohgad Base Village",
+-    meetingTime: "06:00 AM",
+-  },
+-  {
+-    id: 2,
+-    name: "Visapur Explorers",
+-    fortName: "Visapur Fort",
+-    fortId: 2,
+-    date: "2024-01-20",
+-    members: 5,
+-    maxMembers: 10,
+-    organizer: "Priya Sharma",
+-    description: "Exploring the ancient caves and rock structures of Visapur Fort.",
+-    difficulty: "Easy",
+-    meetingPoint: "Visapur Base Village",
+-    meetingTime: "07:00 AM",
+-  },
+-  {
+-    id: 3,
+-    name: "Tikona Challenge",
+-    fortName: "Tikona Fort",
+-    fortId: 4,
+-    date: "2024-01-25",
+-    members: 6,
+-    maxMembers: 8,
+-    organizer: "Amit Desai",
+-    description: "Challenging trek to the triangular fort. For experienced trekkers only.",
+-    difficulty: "Moderate",
+-    meetingPoint: "Tikona Base Village",
+-    meetingTime: "05:30 AM",
+-  },
+-]
++type Group = {
++  id: string
++  name: string
++  fortId: string
++  fortName: string
++  date: string // yyyy-MM-dd
++  members: number
++  maxMembers: number
++  organizerId: string
++  organizer: string
++  description: string
++  difficulty: string
++  meetingPoint: string
++  meetingTime: string
++  memberIds: string[]
++}
+ 
+ const fortsData: Record<string, string> = {
+   "1": "Lohgad Fort",
+@@ -74,11 +60,19 @@ const fortsData: Record<string, string> = {
+ }
+ 
+ export default function GroupPage() {
++  const router = useRouter()
++  const { user, name, ready, signOut } = useRequireUser()
++  const [groups, setGroups] = useState<Group[]>([])
++  const [groupsLoading, setGroupsLoading] = useState(true)
++  const [actionError, setActionError] = useState<string | null>(null)
++  const [joiningId, setJoiningId] = useState<string | null>(null)
++
+   const [selectedFort, setSelectedFort] = useState<string>("")
+   const [selectedDate, setSelectedDate] = useState<Date>()
+   const [groupName, setGroupName] = useState("")
+   const [description, setDescription] = useState("")
+   const [maxMembers, setMaxMembers] = useState("10")
++  const [difficulty, setDifficulty] = useState("Moderate")
+   const [meetingPoint, setMeetingPoint] = useState("")
+   const [meetingTime, setMeetingTime] = useState("")
+   const [isCreating, setIsCreating] = useState(false)
+@@ -92,25 +86,104 @@ export default function GroupPage() {
+     }
+   }, [])
+ 
++  // Live list of groups
++  useEffect(() => {
++    if (!user) return
++    const q = query(collection(getDb(), "groups"), orderBy("createdAt", "desc"))
++    return onSnapshot(
++      q,
++      (snap) => {
++        setGroups(
++          snap.docs.map((d) => {
++            const g = d.data()
++            return {
++              id: d.id,
++              name: g.name,
++              fortId: g.fortId,
++              fortName: g.fortName,
++              date: g.date,
++              members: g.memberCount,
++              maxMembers: g.maxMembers,
++              organizerId: g.organizerId,
++              organizer: g.organizerName,
++              description: g.description,
++              difficulty: g.difficulty,
++              meetingPoint: g.meetingPoint,
++              meetingTime: g.meetingTime,
++              memberIds: g.memberIds ?? [],
++            } as Group
++          }),
++        )
++        setGroupsLoading(false)
++      },
++      (e) => {
++        setActionError(e.message)
++        setGroupsLoading(false)
++      },
++    )
++  }, [user])
++
+   const handleCreateGroup = async (e: React.FormEvent) => {
+     e.preventDefault()
++    if (!user) return
++    if (!selectedDate) {
++      setActionError("Please pick a trek date.")
++      return
++    }
+     setIsCreating(true)
+-
+-    // Simulate group creation
+-    setTimeout(() => {
++    setActionError(null)
++    try {
++      const ref = await addDoc(collection(getDb(), "groups"), {
++        name: groupName.trim(),
++        fortId: selectedFort,
++        fortName: fortsData[selectedFort],
++        description: description.trim(),
++        date: format(selectedDate, "yyyy-MM-dd"),
++        meetingPoint: meetingPoint.trim(),
++        meetingTime,
++        difficulty,
++        maxMembers: Number(maxMembers),
++        memberCount: 1,
++        memberIds: [user.uid],
++        members: { [user.uid]: name },
++        organizerId: user.uid,
++        organizerName: name,
++        createdAt: serverTimestamp(),
++      })
++      router.push(`/group/${ref.id}`)
++    } catch (err) {
++      setActionError(err instanceof Error ? err.message : "Could not create group")
+       setIsCreating(false)
+-      alert("Group created successfully! You'll be redirected to the group page.")
+-      // Reset form
+-      setGroupName("")
+-      setDescription("")
+-      setSelectedDate(undefined)
+-      setMeetingPoint("")
+-      setMeetingTime("")
+-    }, 2000)
++    }
++  }
++
++  const handleJoinGroup = async (groupId: string) => {
++    if (!user) return
++    setJoiningId(groupId)
++    setActionError(null)
++    try {
++      const ref = doc(getDb(), "groups", groupId)
++      await runTransaction(getDb(), async (tx) => {
++        const snap = await tx.get(ref)
++        if (!snap.exists()) throw new Error("This group no longer exists.")
++        const g = snap.data()
++        if (g.memberIds.includes(user.uid)) return
++        if (g.memberCount >= g.maxMembers) throw new Error("This group is full.")
++        tx.update(ref, {
++          memberIds: arrayUnion(user.uid),
++          memberCount: increment(1),
++          [`members.${user.uid}`]: name,
++        })
++      })
++      router.push(`/group/${groupId}`)
++    } catch (err) {
++      setActionError(err instanceof Error ? err.message : "Could not join group")
++      setJoiningId(null)
++    }
+   }
+ 
+-  const handleJoinGroup = (groupId: number) => {
+-    alert(`Successfully joined the group! You'll receive further details via email.`)
++  if (!ready || !user) {
++    return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading…</div>
+   }
+ 
+   return (
+@@ -131,6 +204,12 @@ export default function GroupPage() {
+                 <h1 className="text-xl font-bold text-foreground">Forts Explorer</h1>
+               </div>
+             </div>
++            <div className="flex items-center space-x-3">
++              <span className="text-sm text-muted-foreground hidden sm:inline">{name}</span>
++              <Button variant="outline" size="sm" onClick={() => signOut()}>
++                Sign out
++              </Button>
++            </div>
+           </div>
+         </div>
+       </div>
+@@ -165,8 +244,14 @@ export default function GroupPage() {
+                   <div className="space-y-4">
+                     <h3 className="text-xl font-semibold text-foreground">Available Groups</h3>
+ 
++                    {actionError && <p className="text-sm text-destructive">{actionError}</p>}
++                    {groupsLoading && <p className="text-muted-foreground">Loading groups…</p>}
++                    {!groupsLoading && groups.length === 0 && (
++                      <p className="text-muted-foreground">No groups yet. Be the first to create one!</p>
++                    )}
++
+                     <div className="grid md:grid-cols-2 gap-4">
+-                      {existingGroups.map((group) => (
++                      {groups.map((group) => (
+                         <Card key={group.id} className="border-border hover:border-primary/50 transition-colors">
+                           <CardHeader className="pb-3">
+                             <div className="flex items-start justify-between">
+@@ -214,13 +299,26 @@ export default function GroupPage() {
+ 
+                             <Separator />
+ 
+-                            <Button
+-                              onClick={() => handleJoinGroup(group.id)}
+-                              className="w-full"
+-                              disabled={group.members >= group.maxMembers}
+-                            >
+-                              {group.members >= group.maxMembers ? "Group Full" : "Join Group"}
+-                            </Button>
++                            {user && group.memberIds.includes(user.uid) ? (
++                              <Button asChild className="w-full">
++                                <Link href={`/group/${group.id}`}>
++                                  <MessageSquare className="h-4 w-4 mr-2" />
++                                  Open Chat
++                                </Link>
++                              </Button>
++                            ) : (
++                              <Button
++                                onClick={() => handleJoinGroup(group.id)}
++                                className="w-full"
++                                disabled={group.members >= group.maxMembers || joiningId === group.id}
++                              >
++                                {group.members >= group.maxMembers
++                                  ? "Group Full"
++                                  : joiningId === group.id
++                                    ? "Joining..."
++                                    : "Join Group"}
++                              </Button>
++                            )}
+                           </CardContent>
+                         </Card>
+                       ))}
+@@ -327,6 +425,20 @@ export default function GroupPage() {
+                         </div>
+                       </div>
+ 
++                      <div className="space-y-2">
++                        <Label htmlFor="difficulty">Difficulty</Label>
++                        <select
++                          id="difficulty"
++                          value={difficulty}
++                          onChange={(e) => setDifficulty(e.target.value)}
++                          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
++                        >
++                          <option>Easy</option>
++                          <option>Moderate</option>
++                          <option>Hard</option>
++                        </select>
++                      </div>
++
+                       <div className="space-y-2">
+                         <Label htmlFor="meeting-point">Meeting Point</Label>
+                         <Input
+@@ -339,6 +451,8 @@ export default function GroupPage() {
+                         />
+                       </div>
+ 
++                      {actionError && <p className="text-sm text-destructive">{actionError}</p>}
++
+                       <Button type="submit" className="w-full" disabled={isCreating}>
+                         {isCreating ? "Creating Group..." : "Create Group"}
+                       </Button>
+diff --git a/app/layout.tsx b/app/layout.tsx
+index 28c4784..33af310 100644
+--- a/app/layout.tsx
++++ b/app/layout.tsx
+@@ -4,6 +4,7 @@ import { GeistSans } from "geist/font/sans"
+ import { GeistMono } from "geist/font/mono"
+ import { Analytics } from "@vercel/analytics/next"
+ import { Suspense } from "react"
++import { AuthProvider } from "@/components/auth-provider"
+ import "./globals.css"
+ 
+ export const metadata: Metadata = {
+@@ -20,7 +21,9 @@ export default function RootLayout({
+   return (
+     <html lang="en" className="dark">
+       <body className={`font-sans ${GeistSans.variable} ${GeistMono.variable} antialiased`}>
+-        <Suspense fallback={null}>{children}</Suspense>
++        <AuthProvider>
++          <Suspense fallback={null}>{children}</Suspense>
++        </AuthProvider>
+         <Analytics />
+       </body>
+     </html>
+diff --git a/app/login/page.tsx b/app/login/page.tsx
+new file mode 100644
+index 0000000..9e35c81
+--- /dev/null
++++ b/app/login/page.tsx
+@@ -0,0 +1,207 @@
++"use client"
++
++import { useEffect, useState } from "react"
++import { useRouter } from "next/navigation"
++import Link from "next/link"
++import {
++  GoogleAuthProvider,
++  createUserWithEmailAndPassword,
++  sendPasswordResetEmail,
++  signInWithEmailAndPassword,
++  signInWithPopup,
++  updateProfile,
++} from "firebase/auth"
++import { ArrowLeft, Mountain } from "lucide-react"
++import { Button } from "@/components/ui/button"
++import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
++import { Input } from "@/components/ui/input"
++import { Label } from "@/components/ui/label"
++import { Separator } from "@/components/ui/separator"
++import { useAuth } from "@/components/auth-provider"
++import { getFirebaseAuth } from "@/lib/firebase"
++
++function friendlyError(err: unknown): string {
++  const code = (err as { code?: string })?.code ?? ""
++  switch (code) {
++    case "auth/invalid-credential":
++    case "auth/wrong-password":
++    case "auth/user-not-found":
++      return "Incorrect email or password."
++    case "auth/email-already-in-use":
++      return "An account with this email already exists. Try signing in."
++    case "auth/weak-password":
++      return "Password must be at least 6 characters."
++    case "auth/invalid-email":
++      return "Please enter a valid email address."
++    case "auth/too-many-requests":
++      return "Too many attempts. Please wait a moment and try again."
++    case "auth/popup-closed-by-user":
++    case "auth/cancelled-popup-request":
++      return ""
++    case "auth/operation-not-allowed":
++      return "This sign-in method isn't enabled in the Firebase console yet."
++    default:
++      return err instanceof Error ? err.message : "Something went wrong."
++  }
++}
++
++export default function LoginPage() {
++  const router = useRouter()
++  const { user, loading, configError, refresh } = useAuth()
++  const [mode, setMode] = useState<"signin" | "signup">("signin")
++  const [name, setName] = useState("")
++  const [email, setEmail] = useState("")
++  const [password, setPassword] = useState("")
++  const [busy, setBusy] = useState(false)
++  const [error, setError] = useState<string | null>(null)
++  const [info, setInfo] = useState<string | null>(null)
++  const [next, setNext] = useState("/group")
++
++  useEffect(() => {
++    const n = new URLSearchParams(window.location.search).get("next")
++    // only allow same-site relative paths
++    if (n && n.startsWith("/") && !n.startsWith("//")) setNext(n)
++  }, [])
++
++  // Already signed in (or just signed in) -> go where they were headed
++  useEffect(() => {
++    if (!loading && user) router.replace(next)
++  }, [loading, user, next, router])
++
++  const run = async (fn: () => Promise<unknown>) => {
++    setBusy(true)
++    setError(null)
++    setInfo(null)
++    try {
++      await fn()
++    } catch (err) {
++      const msg = friendlyError(err)
++      if (msg) setError(msg)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  const handleSubmit = (e: React.FormEvent) => {
++    e.preventDefault()
++    const auth = getFirebaseAuth()
++    run(async () => {
++      if (mode === "signup") {
++        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password)
++        await updateProfile(cred.user, { displayName: name.trim() })
++        // the auth listener fired before the name was set, so re-read the profile
++        await refresh()
++      } else {
++        await signInWithEmailAndPassword(auth, email.trim(), password)
++      }
++    })
++  }
++
++  const handleGoogle = () => run(() => signInWithPopup(getFirebaseAuth(), new GoogleAuthProvider()))
++
++  const handleReset = () => {
++    if (!email.trim()) {
++      setError("Enter your email above first, then click “Forgot password?”.")
++      return
++    }
++    run(async () => {
++      await sendPasswordResetEmail(getFirebaseAuth(), email.trim())
++      setInfo("Password reset email sent. Check your inbox.")
++    })
++  }
++
++  if (configError) {
++    return (
++      <div className="min-h-screen flex items-center justify-center p-4 text-center">
++        <p className="text-destructive max-w-md">Firebase isn't configured: {configError}. Check your .env.local values.</p>
++      </div>
++    )
++  }
++
++  return (
++    <div className="min-h-screen flex items-center justify-center p-4 bg-background">
++      <div className="w-full max-w-md space-y-4">
++        <Link href="/search">
++          <Button variant="ghost" size="sm">
++            <ArrowLeft className="h-4 w-4 mr-2" />
++            Back
++          </Button>
++        </Link>
++        <Card>
++          <CardHeader className="text-center">
++            <Mountain className="h-10 w-10 text-primary mx-auto mb-2" />
++            <CardTitle>{mode === "signin" ? "Welcome back" : "Create your account"}</CardTitle>
++            <CardDescription>
++              {mode === "signin" ? "Sign in to join groups and chat with trekkers." : "Sign up to create and join trek groups."}
++            </CardDescription>
++          </CardHeader>
++          <CardContent className="space-y-4">
++            <Button type="button" variant="outline" className="w-full" onClick={handleGoogle} disabled={busy}>
++              Continue with Google
++            </Button>
++
++            <div className="flex items-center gap-3">
++              <Separator className="flex-1" />
++              <span className="text-xs text-muted-foreground">or</span>
++              <Separator className="flex-1" />
++            </div>
++
++            <form onSubmit={handleSubmit} className="space-y-4">
++              {mode === "signup" && (
++                <div className="space-y-2">
++                  <Label htmlFor="name">Name</Label>
++                  <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="How trekkers will see you" maxLength={40} required />
++                </div>
++              )}
++              <div className="space-y-2">
++                <Label htmlFor="email">Email</Label>
++                <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
++              </div>
++              <div className="space-y-2">
++                <div className="flex items-center justify-between">
++                  <Label htmlFor="password">Password</Label>
++                  {mode === "signin" && (
++                    <button type="button" onClick={handleReset} className="text-xs text-primary hover:underline">
++                      Forgot password?
++                    </button>
++                  )}
++                </div>
++                <Input
++                  id="password"
++                  type="password"
++                  value={password}
++                  onChange={(e) => setPassword(e.target.value)}
++                  autoComplete={mode === "signin" ? "current-password" : "new-password"}
++                  minLength={6}
++                  required
++                />
++              </div>
++
++              {error && <p className="text-sm text-destructive">{error}</p>}
++              {info && <p className="text-sm text-muted-foreground">{info}</p>}
++
++              <Button type="submit" className="w-full" disabled={busy}>
++                {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
++              </Button>
++            </form>
++
++            <p className="text-center text-sm text-muted-foreground">
++              {mode === "signin" ? "New here? " : "Already have an account? "}
++              <button
++                type="button"
++                className="text-primary hover:underline"
++                onClick={() => {
++                  setMode(mode === "signin" ? "signup" : "signin")
++                  setError(null)
++                  setInfo(null)
++                }}
++              >
++                {mode === "signin" ? "Create an account" : "Sign in"}
++              </button>
++            </p>
++          </CardContent>
++        </Card>
++      </div>
++    </div>
++  )
++}
+diff --git a/app/search/page.tsx b/app/search/page.tsx
+index 617e57b..7e68c51 100644
+--- a/app/search/page.tsx
++++ b/app/search/page.tsx
+@@ -280,13 +280,10 @@ const joinGroup = (groupId: number) => {
+               variant="outline"
+               size="sm"
+               className="flex items-center space-x-2"
+-              onClick={() => {
+-                setIsChatOpen(!isChatOpen);
+-                setIsWishlistOpen(false); // Close wishlist if opening chat
+-              }}
++              onClick={() => router.push("/group")}
+             >
+               <MessageSquare className="h-4 w-4 text-blue-500" />
+-              <span>Chat ({myChatGroups.length})</span>
++              <span>Groups &amp; Chat</span>
+             </Button>
+ 
+             {/* Wishlist Button */}
+diff --git a/components/auth-provider.tsx b/components/auth-provider.tsx
+new file mode 100644
+index 0000000..d80f729
+--- /dev/null
++++ b/components/auth-provider.tsx
+@@ -0,0 +1,60 @@
++"use client"
++
++import { createContext, useContext, useEffect, useState } from "react"
++import { onAuthStateChanged, signOut as fbSignOut, type User } from "firebase/auth"
++import { getFirebaseAuth } from "@/lib/firebase"
++
++type AuthState = {
++  user: User | null
++  /** Human-friendly name: profile name, else the part of the email before the @ */
++  name: string
++  loading: boolean
++  configError: string | null
++  signOut: () => Promise<void>
++  /** Re-read the profile (e.g. after updateProfile) and re-render */
++  refresh: () => Promise<void>
++}
++
++const AuthContext = createContext<AuthState | null>(null)
++
++export function displayNameOf(user: User | null) {
++  if (!user) return ""
++  return user.displayName?.trim() || user.email?.split("@")[0] || "Trekker"
++}
++
++export function AuthProvider({ children }: { children: React.ReactNode }) {
++  const [user, setUser] = useState<User | null>(null)
++  const [loading, setLoading] = useState(true)
++  const [configError, setConfigError] = useState<string | null>(null)
++  const [, setTick] = useState(0)
++
++  useEffect(() => {
++    try {
++      return onAuthStateChanged(getFirebaseAuth(), (u) => {
++        setUser(u)
++        setLoading(false)
++      })
++    } catch (e) {
++      setConfigError(e instanceof Error ? e.message : "Firebase is not configured")
++      setLoading(false)
++    }
++  }, [])
++
++  const signOut = () => fbSignOut(getFirebaseAuth())
++  const refresh = async () => {
++    await getFirebaseAuth().currentUser?.reload()
++    setTick((t) => t + 1)
++  }
++
++  return (
++    <AuthContext.Provider value={{ user, name: displayNameOf(user), loading, configError, signOut, refresh }}>
++      {children}
++    </AuthContext.Provider>
++  )
++}
++
++export function useAuth() {
++  const ctx = useContext(AuthContext)
++  if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>")
++  return ctx
++}
+diff --git a/firestore.rules b/firestore.rules
+new file mode 100644
+index 0000000..09b2b9f
+--- /dev/null
++++ b/firestore.rules
+@@ -0,0 +1,59 @@
++rules_version = '2';
++service cloud.firestore {
++  match /databases/{database}/documents {
++
++    // Real accounts only (email/Google) - anonymous sessions are rejected.
++    function signedIn() {
++      return request.auth != null
++        && request.auth.token.firebase.sign_in_provider != 'anonymous';
++    }
++
++    match /groups/{groupId} {
++      allow read: if signedIn();
++
++      // Creator becomes the first member.
++      allow create: if signedIn()
++        && request.resource.data.organizerId == request.auth.uid
++        && request.resource.data.memberIds == [request.auth.uid]
++        && request.resource.data.memberCount == 1
++        && request.resource.data.maxMembers is int
++        && request.resource.data.maxMembers >= 2
++        && request.resource.data.maxMembers <= 20;
++
++      // Only membership fields can change, and only for yourself.
++      allow update: if signedIn()
++        && request.resource.data.diff(resource.data).affectedKeys()
++             .hasOnly(['memberIds', 'memberCount', 'members'])
++        && (
++          // join (respecting capacity)
++          ( !(request.auth.uid in resource.data.memberIds)
++            && request.auth.uid in request.resource.data.memberIds
++            && request.resource.data.memberIds.size() == resource.data.memberIds.size() + 1
++            && request.resource.data.memberCount == resource.data.memberCount + 1
++            && request.resource.data.memberCount <= resource.data.maxMembers )
++          ||
++          // leave (organizer cannot leave)
++          ( request.auth.uid in resource.data.memberIds
++            && !(request.auth.uid in request.resource.data.memberIds)
++            && request.auth.uid != resource.data.organizerId
++            && request.resource.data.memberIds.size() == resource.data.memberIds.size() - 1
++            && request.resource.data.memberCount == resource.data.memberCount - 1 )
++        );
++
++      allow delete: if signedIn() && resource.data.organizerId == request.auth.uid;
++
++      // Chat: only group members can read or post.
++      match /messages/{messageId} {
++        allow read: if signedIn()
++          && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberIds;
++
++        allow create: if signedIn()
++          && request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberIds
++          && request.resource.data.senderId == request.auth.uid
++          && request.resource.data.text is string
++          && request.resource.data.text.size() > 0
++          && request.resource.data.text.size() <= 1000;
++      }
++    }
++  }
++}
+diff --git a/hooks/use-user.ts b/hooks/use-user.ts
+new file mode 100644
+index 0000000..3f3ed9c
+--- /dev/null
++++ b/hooks/use-user.ts
+@@ -0,0 +1,23 @@
++"use client"
++
++import { useEffect } from "react"
++import { usePathname, useRouter } from "next/navigation"
++import { useAuth } from "@/components/auth-provider"
++
++/**
++ * For pages that need a signed-in user: sends visitors to /login (and back afterwards).
++ * `ready` is true only once a user is available.
++ */
++export function useRequireUser() {
++  const auth = useAuth()
++  const router = useRouter()
++  const pathname = usePathname()
++
++  useEffect(() => {
++    if (!auth.loading && !auth.user && !auth.configError) {
++      router.replace(`/login?next=${encodeURIComponent(pathname)}`)
++    }
++  }, [auth.loading, auth.user, auth.configError, router, pathname])
++
++  return { ...auth, ready: !auth.loading && !!auth.user }
++}
+diff --git a/lib/firebase.ts b/lib/firebase.ts
+new file mode 100644
+index 0000000..9efbb94
+--- /dev/null
++++ b/lib/firebase.ts
+@@ -0,0 +1,20 @@
++import { initializeApp, getApps, getApp, type FirebaseApp } from "firebase/app"
++import { getAuth, type Auth } from "firebase/auth"
++import { getFirestore, type Firestore } from "firebase/firestore"
++
++const firebaseConfig = {
++  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
++  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
++  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
++  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
++  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
++  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
++}
++
++// Lazy getters: only initialised in the browser, so `next build` doesn't need env vars.
++function getFirebaseApp(): FirebaseApp {
++  return getApps().length ? getApp() : initializeApp(firebaseConfig)
++}
++
++export const getDb = (): Firestore => getFirestore(getFirebaseApp())
++export const getFirebaseAuth = (): Auth => getAuth(getFirebaseApp())
+diff --git a/package.json b/package.json
+index 5523f60..733eedf 100644
+--- a/package.json
++++ b/package.json
+@@ -44,6 +44,7 @@
+     "cmdk": "1.0.4",
+     "date-fns": "latest",
+     "embla-carousel-react": "8.5.1",
++    "firebase": "^12.19.0",
+     "geist": "latest",
+     "input-otp": "1.4.1",
+     "lucide-react": "^0.454.0",
+@@ -71,4 +72,4 @@
+     "tw-animate-css": "1.3.3",
+     "typescript": "^5"
+   }
+-}
+\ No newline at end of file
++}
